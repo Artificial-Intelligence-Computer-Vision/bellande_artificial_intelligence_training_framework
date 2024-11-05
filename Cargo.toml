@@ -1,0 +1,16 @@
+[package]
+name = "bellande_ai_training_framework"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+numpy = "0.17"
+ndarray = "0.15"
+tch = "0.8"
+rayon = "1.5"
+plotters = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+rand = "0.8"
+log = "0.4"
+env_logger = "0.9"
