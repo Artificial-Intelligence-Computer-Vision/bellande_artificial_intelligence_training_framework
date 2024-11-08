@@ -13,27 +13,32 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-pub trait DataAugmentation: Send + Sync {
-    fn apply(&self, data: &[f32], shape: &[usize]) -> Vec<f32>;
+use crate::core::{error::BellandeError, tensor::Tensor};
+
+use image::{DynamicImage, ImageBuffer, Rgba};
+use rand::Rng;
+
+pub trait Transform: Send + Sync {
+    fn apply(&self, tensor: &Tensor) -> Result<Tensor, BellandeError>;
 }
 
 pub struct Compose {
-    transformations: Vec<Box<dyn DataAugmentation>>,
+    transforms: Vec<Box<dyn Transform>>,
 }
 
 impl Compose {
-    pub fn new(transformations: Vec<Box<dyn DataAugmentation>>) -> Self {
-        Compose { transformations }
+    pub fn new(transforms: Vec<Box<dyn Transform>>) -> Self {
+        Compose { transforms }
     }
 }
 
-impl DataAugmentation for Compose {
-    fn apply(&self, data: &[f32], shape: &[usize]) -> Vec<f32> {
-        let mut result = data.to_vec();
-        for transform in &self.transformations {
-            result = transform.apply(&result, shape);
+impl Transform for Compose {
+    fn apply(&self, tensor: &Tensor) -> Result<Tensor, BellandeError> {
+        let mut current = tensor.clone();
+        for transform in &self.transforms {
+            current = transform.apply(&current)?;
         }
-        result
+        Ok(current)
     }
 }
 
@@ -43,32 +48,65 @@ pub struct RandomHorizontalFlip {
 
 impl RandomHorizontalFlip {
     pub fn new(p: f32) -> Self {
+        assert!(p >= 0.0 && p <= 1.0);
         RandomHorizontalFlip { p }
     }
 }
 
-impl DataAugmentation for RandomHorizontalFlip {
-    fn apply(&self, data: &[f32], shape: &[usize]) -> Vec<f32> {
-        let mut rng = rand::thread_rng();
-        if rng.gen::<f32>() > self.p {
-            return data.to_vec();
+impl Transform for RandomHorizontalFlip {
+    fn apply(&self, tensor: &Tensor) -> Result<Tensor, BellandeError> {
+        if tensor.shape.len() != 4 {
+            return Err(BellandeError::InvalidShape);
         }
 
-        let mut result = vec![0.0; data.len()];
-        let channels = shape[0];
-        let height = shape[1];
-        let width = shape[2];
+        let mut rng = rand::thread_rng();
+        if rng.gen::<f32>() > self.p {
+            return Ok(tensor.clone());
+        }
 
-        for c in 0..channels {
-            for h in 0..height {
-                for w in 0..width {
-                    let src_idx = ((c * height + h) * width + w) as usize;
-                    let dst_idx = ((c * height + h) * width + (width - 1 - w)) as usize;
-                    result[dst_idx] = data[src_idx];
+        let (batch_size, channels, height, width) = (
+            tensor.shape[0],
+            tensor.shape[1],
+            tensor.shape[2],
+            tensor.shape[3],
+        );
+
+        let mut flipped_data = vec![0.0; tensor.data.len()];
+        for b in 0..batch_size {
+            for c in 0..channels {
+                for h in 0..height {
+                    for w in 0..width {
+                        let src_idx = ((b * channels + c) * height + h) * width + w;
+                        let dst_idx = ((b * channels + c) * height + h) * width + (width - 1 - w);
+                        flipped_data[dst_idx] = tensor.data[src_idx];
+                    }
                 }
             }
         }
 
-        result
+        Ok(Tensor::new(
+            flipped_data,
+            tensor.shape.clone(),
+            tensor.requires_grad,
+            tensor.device.clone(),
+            tensor.dtype,
+        ))
+    }
+}
+
+pub struct RandomRotation {
+    degrees: (f32, f32),
+}
+
+impl RandomRotation {
+    pub fn new(degrees: (f32, f32)) -> Self {
+        RandomRotation { degrees }
+    }
+}
+
+impl Transform for RandomRotation {
+    fn apply(&self, tensor: &Tensor) -> Result<Tensor, BellandeError> {
+        // Implementation for random rotation
+        unimplemented!()
     }
 }

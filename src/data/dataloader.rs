@@ -13,65 +13,97 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use image::{ImageBuffer, Rgb};
-use rand::seq::SliceRandom;
-use std::path::Path;
+use crate::core::tensor::Tensor;
+use crate::data::{dataset::Dataset, sampler::Sampler};
+use rayon::prelude::*;
+use std::sync::Arc;
 
 pub struct DataLoader {
+    dataset: Arc<Dataset>,
     batch_size: usize,
     shuffle: bool,
-    dataset: Dataset,
-    indices: Vec<usize>,
-    current_idx: usize,
+    num_workers: usize,
+    sampler: Option<Box<dyn Sampler>>,
+    drop_last: bool,
 }
 
 impl DataLoader {
-    pub fn new(dataset: Dataset, batch_size: usize, shuffle: bool) -> Self {
-        let indices: Vec<usize> = (0..dataset.len()).collect();
+    pub fn new(
+        dataset: Dataset,
+        batch_size: usize,
+        shuffle: bool,
+        num_workers: usize,
+        sampler: Option<Box<dyn Sampler>>,
+        drop_last: bool,
+    ) -> Self {
         DataLoader {
+            dataset: Arc::new(dataset),
             batch_size,
             shuffle,
-            dataset,
-            indices,
-            current_idx: 0,
+            num_workers,
+            sampler,
+            drop_last,
+        }
+    }
+
+    pub fn iter(&self) -> DataLoaderIterator {
+        DataLoaderIterator {
+            dataloader: self,
+            index: 0,
         }
     }
 }
 
-impl Iterator for DataLoader {
+pub struct DataLoaderIterator<'a> {
+    dataloader: &'a DataLoader,
+    index: usize,
+}
+
+impl<'a> Iterator for DataLoaderIterator<'a> {
     type Item = (Tensor, Tensor);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_idx >= self.dataset.len() {
-            if self.shuffle {
-                let mut rng = rand::thread_rng();
-                self.indices.shuffle(&mut rng);
-            }
-            self.current_idx = 0;
+        if self.index >= self.dataloader.dataset.len() {
             return None;
         }
 
-        let end_idx = (self.current_idx + self.batch_size).min(self.dataset.len());
-        let batch_indices = &self.indices[self.current_idx..end_idx];
+        let batch_indices: Vec<usize> = if let Some(sampler) = &self.dataloader.sampler {
+            sampler.sample(self.dataloader.batch_size)
+        } else if self.dataloader.shuffle {
+            use rand::seq::SliceRandom;
+            let mut rng = rand::thread_rng();
+            let mut indices: Vec<usize> = (0..self.dataloader.dataset.len()).collect();
+            indices.shuffle(&mut rng);
+            indices[..self.dataloader.batch_size].to_vec()
+        } else {
+            (self.index..self.index + self.dataloader.batch_size)
+                .filter(|&i| i < self.dataloader.dataset.len())
+                .collect()
+        };
 
-        let mut batch_x = Vec::new();
-        let mut batch_y = Vec::new();
+        let batch: Vec<(Tensor, Tensor)> = if self.dataloader.num_workers > 1 {
+            batch_indices
+                .par_iter()
+                .map(|&idx| self.dataloader.dataset.get(idx))
+                .collect()
+        } else {
+            batch_indices
+                .iter()
+                .map(|&idx| self.dataloader.dataset.get(idx))
+                .collect()
+        };
 
-        for &idx in batch_indices {
-            let (x, y) = self.dataset.get(idx);
-            batch_x.extend_from_slice(&x.data);
-            batch_y.push(y);
+        if batch.is_empty() {
+            return None;
         }
 
-        self.current_idx = end_idx;
+        self.index += self.dataloader.batch_size;
 
-        Some((
-            Tensor::new(
-                batch_x,
-                vec![batch_indices.len(), self.dataset.input_shape()],
-                false,
-            ),
-            Tensor::new(batch_y, vec![batch_indices.len()], false),
-        ))
+        Some(collate_batch(batch))
     }
+}
+
+fn collate_batch(batch: Vec<(Tensor, Tensor)>) -> (Tensor, Tensor) {
+    // Implement batch collation
+    unimplemented!()
 }

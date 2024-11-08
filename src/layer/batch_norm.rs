@@ -13,38 +13,38 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::collections::HashMap;
+use crate::core::{error::BellandeError, tensor::Tensor};
+use std::sync::Arc;
 
 pub struct BatchNorm2d {
     num_features: usize,
     eps: f32,
     momentum: f32,
-    running_mean: Vec<f32>,
-    running_var: Vec<f32>,
-    weight: Tensor, // gamma
-    bias: Tensor,   // beta
-    cache: Option<BatchNormCache>,
+    running_mean: Arc<Tensor>,
+    running_var: Arc<Tensor>,
+    weight: Option<Tensor>,
+    bias: Option<Tensor>,
     training: bool,
 }
 
-struct BatchNormCache {
-    input: Tensor,
-    normalized: Tensor,
-    std: Vec<f32>,
-    centered: Vec<f32>,
-}
-
 impl BatchNorm2d {
-    pub fn new(num_features: usize, eps: f32, momentum: f32) -> Self {
+    pub fn new(num_features: usize, eps: f32, momentum: f32, affine: bool) -> Self {
         BatchNorm2d {
             num_features,
             eps,
             momentum,
-            running_mean: vec![0.0; num_features],
-            running_var: vec![1.0; num_features],
-            weight: Tensor::new(vec![1.0; num_features], vec![num_features], true),
-            bias: Tensor::new(vec![0.0; num_features], vec![num_features], true),
-            cache: None,
+            running_mean: Arc::new(Tensor::zeros(&[num_features])),
+            running_var: Arc::new(Tensor::ones(&[num_features])),
+            weight: if affine {
+                Some(Tensor::ones(&[num_features]))
+            } else {
+                None
+            },
+            bias: if affine {
+                Some(Tensor::zeros(&[num_features]))
+            } else {
+                None
+            },
             training: true,
         }
     }
@@ -56,25 +56,31 @@ impl BatchNorm2d {
     pub fn eval(&mut self) {
         self.training = false;
     }
-}
 
-impl Layer for BatchNorm2d {
-    fn forward(&self, input: &Tensor) -> Tensor {
-        let batch_size = input.shape[0];
-        let channels = input.shape[1];
-        let height = input.shape[2];
-        let width = input.shape[3];
+    pub fn forward(&self, input: &Tensor) -> Result<Tensor, BellandeError> {
+        if input.shape.len() != 4 {
+            return Err(BellandeError::InvalidShape);
+        }
 
-        let mut output = vec![0.0; input.data.len()];
-        let spatial_size = height * width;
+        let (batch_size, channels, height, width) = (
+            input.shape[0],
+            input.shape[1],
+            input.shape[2],
+            input.shape[3],
+        );
+
+        if channels != self.num_features {
+            return Err(BellandeError::DimensionMismatch);
+        }
+
+        let mut output = input.data.clone();
 
         if self.training {
+            // Calculate mean and variance
             let mut mean = vec![0.0; channels];
             let mut var = vec![0.0; channels];
-            let mut normalized = vec![0.0; input.data.len()];
-            let mut centered = vec![0.0; input.data.len()];
+            let size = batch_size * height * width;
 
-            // Calculate mean and variance for each channel
             for c in 0..channels {
                 let mut sum = 0.0;
                 let mut sq_sum = 0.0;
@@ -90,110 +96,65 @@ impl Layer for BatchNorm2d {
                     }
                 }
 
-                mean[c] = sum / (batch_size * spatial_size) as f32;
-                var[c] = (sq_sum / (batch_size * spatial_size) as f32) - mean[c] * mean[c];
-
-                // Update running statistics
-                self.running_mean[c] =
-                    self.momentum * self.running_mean[c] + (1.0 - self.momentum) * mean[c];
-                self.running_var[c] =
-                    self.momentum * self.running_var[c] + (1.0 - self.momentum) * var[c];
+                mean[c] = sum / size as f32;
+                var[c] = sq_sum / size as f32 - mean[c] * mean[c];
             }
 
-            // Normalize and apply affine transform
-            let std: Vec<f32> = var.iter().map(|&v| (v + self.eps).sqrt()).collect();
-
+            // Update running statistics
             for c in 0..channels {
+                self.running_mean.data[c] =
+                    self.momentum * self.running_mean.data[c] + (1.0 - self.momentum) * mean[c];
+                self.running_var.data[c] =
+                    self.momentum * self.running_var.data[c] + (1.0 - self.momentum) * var[c];
+            }
+
+            // Normalize
+            for c in 0..channels {
+                let std = (var[c] + self.eps).sqrt();
                 for b in 0..batch_size {
                     for h in 0..height {
                         for w in 0..width {
                             let idx = ((b * channels + c) * height + h) * width + w;
-                            centered[idx] = input.data[idx] - mean[c];
-                            normalized[idx] = centered[idx] / std[c];
-                            output[idx] = self.weight.data[c] * normalized[idx] + self.bias.data[c];
+                            output[idx] = (output[idx] - mean[c]) / std;
+
+                            if let Some(ref weight) = self.weight {
+                                output[idx] *= weight.data[c];
+                            }
+                            if let Some(ref bias) = self.bias {
+                                output[idx] += bias.data[c];
+                            }
                         }
                     }
                 }
             }
-
-            self.cache = Some(BatchNormCache {
-                input: input.clone(),
-                normalized: Tensor::new(normalized, input.shape.clone(), true),
-                std,
-                centered,
-            });
         } else {
-            // Inference mode
+            // Use running statistics
             for c in 0..channels {
+                let std = (self.running_var.data[c] + self.eps).sqrt();
                 for b in 0..batch_size {
                     for h in 0..height {
                         for w in 0..width {
                             let idx = ((b * channels + c) * height + h) * width + w;
-                            let normalized = (input.data[idx] - self.running_mean[c])
-                                / (self.running_var[c] + self.eps).sqrt();
-                            output[idx] = self.weight.data[c] * normalized + self.bias.data[c];
+                            output[idx] = (output[idx] - self.running_mean.data[c]) / std;
+
+                            if let Some(ref weight) = self.weight {
+                                output[idx] *= weight.data[c];
+                            }
+                            if let Some(ref bias) = self.bias {
+                                output[idx] += bias.data[c];
+                            }
                         }
                     }
                 }
             }
         }
 
-        Tensor::new(output, input.shape.clone(), input.requires_grad)
-    }
-
-    fn backward(&mut self, grad: &Tensor) -> Tensor {
-        if let Some(cache) = &self.cache {
-            let batch_size = grad.shape[0];
-            let channels = grad.shape[1];
-            let height = grad.shape[2];
-            let width = grad.shape[3];
-            let spatial_size = height * width;
-
-            let mut dx = vec![0.0; grad.data.len()];
-            let mut dgamma = vec![0.0; channels];
-            let mut dbeta = vec![0.0; channels];
-
-            // Calculate gradients for gamma and beta
-            for c in 0..channels {
-                for b in 0..batch_size {
-                    for h in 0..height {
-                        for w in 0..width {
-                            let idx = ((b * channels + c) * height + h) * width + w;
-                            dgamma[c] += grad.data[idx] * cache.normalized.data[idx];
-                            dbeta[c] += grad.data[idx];
-                        }
-                    }
-                }
-            }
-
-            self.weight.grad = Some(dgamma);
-            self.bias.grad = Some(dbeta);
-
-            // Calculate gradient with respect to input
-            let m = (batch_size * spatial_size) as f32;
-
-            for c in 0..channels {
-                let std_inv = 1.0 / cache.std[c];
-
-                for b in 0..batch_size {
-                    for h in 0..height {
-                        for w in 0..width {
-                            let idx = ((b * channels + c) * height + h) * width + w;
-
-                            dx[idx] = grad.data[idx] * self.weight.data[c] * std_inv
-                                - cache.centered[idx] * std_inv * std_inv / m;
-                        }
-                    }
-                }
-            }
-
-            Tensor::new(dx, grad.shape.clone(), true)
-        } else {
-            panic!("Backward called before forward!");
-        }
-    }
-
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![self.weight.clone(), self.bias.clone()]
+        Ok(Tensor::new(
+            output,
+            input.shape.clone(),
+            input.requires_grad,
+            input.device.clone(),
+            input.dtype,
+        ))
     }
 }

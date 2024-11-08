@@ -13,170 +13,236 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-pub struct TrainingConfig {
-    pub num_epochs: usize,
-    pub save_frequency: usize,
-    pub checkpoint_dir: String,
-    pub device: Device,
-    pub distributed: bool,
-    pub world_size: usize,
-    pub rank: usize,
+use crate::core::{device::Device, error::BellandeError};
+use crate::data::dataloader::DataLoader;
+use crate::models::models::Model;
+use crate::training::{callbacks::Callback, history::TrainingHistory, validator::CallbackEvent};
+
+// Import all loss functions
+use crate::loss::{
+    bce::BCELoss, cross_entropy::CrossEntropyLoss, custom::CustomLossFunction, mse::MSELoss, Loss,
+};
+
+// Import all optimizers and scheduler
+use crate::optim::{adam::Adam, rmsprop::RMSprop, scheduler::LRScheduler, sgd::SGD, Optimizer};
+
+use std::collections::HashMap;
+
+/// Helper struct for tracking metrics during training
+#[derive(Default)]
+pub struct RunningMetrics {
+    metrics: HashMap<String, (f32, usize)>, // (sum, count)
 }
 
-pub struct Trainer<M: Model> {
-    model: M,
+impl RunningMetrics {
+    pub fn new() -> Self {
+        Self {
+            metrics: HashMap::new(),
+        }
+    }
+
+    pub fn update(&mut self, name: &str, value: f32) {
+        let entry = self.metrics.entry(name.to_string()).or_insert((0.0, 0));
+        entry.0 += value;
+        entry.1 += 1;
+    }
+
+    pub fn get_average(&self) -> HashMap<String, f32> {
+        self.metrics
+            .iter()
+            .map(|(k, (sum, count))| (k.clone(), sum / *count as f32))
+            .collect()
+    }
+
+    pub fn get_current(&self) -> HashMap<String, f32> {
+        self.get_average()
+    }
+}
+
+pub struct Trainer {
+    model: Box<dyn Model>,
     optimizer: Box<dyn Optimizer>,
     loss_fn: Box<dyn Loss>,
-    metrics: Vec<Box<dyn Metric>>,
-    config: TrainingConfig,
-    validator: Option<Validator<M>>,
-    distributed_trainer: Option<DistributedTrainer>,
+    device: Device,
+    callbacks: Vec<Box<dyn Callback>>,
+    history: TrainingHistory,
+    scheduler: Option<Box<dyn LRScheduler>>,
 }
 
-impl<M: Model> Trainer<M> {
+impl Trainer {
     pub fn new(
-        model: M,
+        model: Box<dyn Model>,
         optimizer: Box<dyn Optimizer>,
         loss_fn: Box<dyn Loss>,
-        metrics: Vec<Box<dyn Metric>>,
-        config: TrainingConfig,
+        device: Device,
     ) -> Self {
-        let distributed_trainer = if config.distributed {
-            Some(DistributedTrainer::new(
-                Box::new(model.clone()),
-                optimizer.clone(),
-                config.world_size,
-                config.rank,
-            ))
-        } else {
-            None
-        };
-
         Trainer {
             model,
             optimizer,
             loss_fn,
-            metrics,
-            config,
-            validator: None,
-            distributed_trainer,
+            device,
+            callbacks: Vec::new(),
+            history: TrainingHistory::new(),
+            scheduler: None,
         }
     }
 
-    pub fn with_validator(mut self, validator: Validator<M>) -> Self {
-        self.validator = Some(validator);
-        self
+    /// Create a new trainer with MSELoss and Adam optimizer
+    pub fn new_with_adam(
+        model: Box<dyn Model>,
+        learning_rate: f32,
+        device: Device,
+    ) -> Result<Self, BellandeError> {
+        let loss_fn = Box::new(MSELoss::new());
+        let optimizer = Box::new(Adam::new(model.parameters(), learning_rate)?);
+
+        Ok(Self::new(model, optimizer, loss_fn, device))
     }
 
-    pub async fn train(
-        &mut self,
-        train_dataloader: &mut DataLoader,
-        val_dataloader: Option<&mut DataLoader>,
-    ) -> TrainingHistory {
-        let mut history = TrainingHistory::new();
+    /// Create a new trainer with CrossEntropyLoss and SGD optimizer
+    pub fn new_with_sgd(
+        model: Box<dyn Model>,
+        learning_rate: f32,
+        momentum: f32,
+        device: Device,
+    ) -> Result<Self, BellandeError> {
+        let loss_fn = Box::new(CrossEntropyLoss::new());
+        let optimizer = Box::new(SGD::new(model.parameters(), learning_rate, momentum)?);
 
-        for epoch in 0..self.config.num_epochs {
+        Ok(Self::new(model, optimizer, loss_fn, device))
+    }
+
+    /// Create a new trainer with BCELoss and RMSprop optimizer
+    pub fn new_with_rmsprop(
+        model: Box<dyn Model>,
+        learning_rate: f32,
+        alpha: f32,
+        device: Device,
+    ) -> Result<Self, BellandeError> {
+        let loss_fn = Box::new(BCELoss::new());
+        let optimizer = Box::new(RMSprop::new(model.parameters(), learning_rate, alpha)?);
+
+        Ok(Self::new(model, optimizer, loss_fn, device))
+    }
+
+    /// Add a learning rate scheduler
+    pub fn add_scheduler(&mut self, scheduler: Box<dyn LRScheduler>) {
+        self.scheduler = Some(scheduler);
+    }
+
+    pub fn add_callback(&mut self, callback: Box<dyn Callback>) {
+        self.callbacks.push(callback);
+    }
+
+    pub fn fit(
+        &mut self,
+        train_loader: DataLoader,
+        val_loader: Option<DataLoader>,
+        epochs: usize,
+    ) -> Result<TrainingHistory, BellandeError> {
+        let mut logs = HashMap::new();
+        self.call_callbacks(CallbackEvent::TrainBegin, &logs)?;
+
+        for epoch in 0..epochs {
+            logs.clear();
+            logs.insert("epoch".to_string(), epoch as f32);
+            self.call_callbacks(CallbackEvent::EpochBegin, &logs)?;
+
             // Training phase
             self.model.train();
-            let mut epoch_loss = 0.0;
-            let mut num_batches = 0;
-
-            for metric in &mut self.metrics {
-                metric.reset();
-            }
-
-            for (batch_x, batch_y) in train_dataloader {
-                let loss = if let Some(trainer) = &self.distributed_trainer {
-                    trainer.train_step((batch_x, batch_y)).await
-                } else {
-                    self.train_step((batch_x, batch_y))
-                };
-
-                epoch_loss += loss;
-                num_batches += 1;
-            }
-
-            let avg_loss = epoch_loss / num_batches as f32;
-            
-            // Collect training metrics
-            let mut metrics = HashMap::new();
-            metrics.insert("loss".to_string(), avg_loss);
-            for metric in &self.metrics {
-                metrics.insert(metric.name().to_string(), metric.compute());
-            }
+            let train_metrics = self.train_epoch(train_loader.clone(), epoch)?;
+            logs.extend(train_metrics);
 
             // Validation phase
-            if let Some(dataloader) = val_dataloader {
-                if let Some(validator) = &mut self.validator {
-                    let val_metrics = validator.validate(dataloader);
-                    for (name, value) in val_metrics {
-                        metrics.insert(format!("val_{}", name), value);
-                    }
+            if let Some(val_loader) = &val_loader {
+                self.model.eval();
+                let val_metrics = self.validate(val_loader.clone())?;
+                logs.extend(
+                    val_metrics
+                        .into_iter()
+                        .map(|(k, v)| (format!("val_{}", k), v)),
+                );
+            }
+
+            // Update learning rate if scheduler is present
+            if let Some(scheduler) = &mut self.scheduler {
+                scheduler.step(epoch, &logs)?;
+            }
+
+            self.history.update(epoch, logs.clone());
+            self.call_callbacks(CallbackEvent::EpochEnd, &logs)?;
+        }
+
+        self.call_callbacks(CallbackEvent::TrainEnd, &logs)?;
+        Ok(self.history.clone())
+    }
+
+    fn train_epoch(
+        &mut self,
+        train_loader: DataLoader,
+        _epoch: usize,
+    ) -> Result<HashMap<String, f32>, BellandeError> {
+        let mut metrics = RunningMetrics::new();
+
+        for (_batch_idx, (data, target)) in train_loader.enumerate() {
+            let batch_logs = HashMap::new();
+            self.call_callbacks(CallbackEvent::BatchBegin, &batch_logs)?;
+
+            // Forward pass
+            let data = data.to(self.device.clone());
+            let target = target.to(self.device.clone());
+            let output = self.model.forward(&data)?;
+            let loss = self.loss_fn.forward(&output, &target)?;
+
+            // Backward pass
+            self.optimizer.zero_grad();
+            let grad = self.loss_fn.backward(&output, &target)?;
+            output.backward_with_grad(&grad)?;
+            self.optimizer.step()?;
+
+            // Update metrics
+            metrics.update("loss", loss.data()[0]);
+
+            let batch_logs = metrics.get_current();
+            self.call_callbacks(CallbackEvent::BatchEnd, &batch_logs)?;
+        }
+
+        Ok(metrics.get_average())
+    }
+
+    fn validate(&mut self, val_loader: DataLoader) -> Result<HashMap<String, f32>, BellandeError> {
+        let mut metrics = RunningMetrics::new();
+
+        for (data, target) in val_loader {
+            let data = data.to(self.device.clone());
+            let target = target.to(self.device.clone());
+            let output = self.model.forward(&data)?;
+            let loss = self.loss_fn.forward(&output, &target)?;
+            metrics.update("loss", loss.data()[0]);
+        }
+
+        Ok(metrics.get_average())
+    }
+
+    fn call_callbacks(
+        &mut self,
+        event: CallbackEvent,
+        logs: &HashMap<String, f32>,
+    ) -> Result<(), BellandeError> {
+        for callback in &mut self.callbacks {
+            match event {
+                CallbackEvent::TrainBegin => callback.on_train_begin(logs)?,
+                CallbackEvent::TrainEnd => callback.on_train_end(logs)?,
+                CallbackEvent::EpochBegin => {
+                    callback.on_epoch_begin(logs.get("epoch").unwrap().clone() as usize, logs)?
                 }
+                CallbackEvent::EpochEnd => {
+                    callback.on_epoch_end(logs.get("epoch").unwrap().clone() as usize, logs)?
+                }
+                CallbackEvent::BatchBegin => callback.on_batch_begin(0, logs)?,
+                CallbackEvent::BatchEnd => callback.on_batch_end(0, logs)?,
             }
-
-            // Save checkpoint if needed
-            if epoch % self.config.save_frequency == 0 {
-                let checkpoint_path = format!("{}/checkpoint_epoch_{}.mbellande", 
-                    self.config.checkpoint_dir, epoch);
-                self.save_checkpoint(&checkpoint_path, epoch, &metrics)?;
-            }
-
-            // Update history
-            history.update(epoch, metrics);
-
-            // Print progress
-            self.print_progress(epoch, &metrics);
         }
-
-        history
-    }
-
-    fn train_step(&mut self, batch: (Tensor, Tensor)) -> f32 {
-        let (batch_x, batch_y) = batch;
-        
-        self.optimizer.zero_grad();
-
-        // Forward pass
-        let prediction = self.model.forward(&batch_x);
-        let loss = self.loss_fn.forward(&prediction, &batch_y);
-
-        // Update metrics
-        for metric in &mut self.metrics {
-            metric.update(&prediction, &batch_y);
-        }
-
-        // Backward pass
-        let grad = self.loss_fn.backward(&prediction, &batch_y);
-        self.model.backward(&grad);
-
-        // Update parameters
-        self.optimizer.step();
-
-        loss
-    }
-
-    fn save_checkpoint(
-        &self,
-        path: &str,
-        epoch: usize,
-        metrics: &HashMap<String, f32>,
-    ) -> std::io::Result<()> {
-        let checkpoint = Checkpoint {
-            epoch,
-            model_state: self.model.state_dict(),
-            optimizer_state: self.optimizer.state_dict(),
-            metrics: metrics.clone(),
-        };
-
-        save_model(&checkpoint, path)
-    }
-
-    fn print_progress(&self, epoch: usize, metrics: &HashMap<String, f32>) {
-        print!("Epoch [{}/{}] ", epoch + 1, self.config.num_epochs);
-        for (name, value) in metrics {
-            print!("{}: {:.4} ", name, value);
-        }
-        println!();
+        Ok(())
     }
 }
