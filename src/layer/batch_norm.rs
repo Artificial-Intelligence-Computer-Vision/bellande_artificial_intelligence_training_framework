@@ -16,6 +16,17 @@
 use crate::core::{error::BellandeError, tensor::Tensor};
 use std::sync::Arc;
 
+pub struct BatchNorm1d {
+    num_features: usize,
+    eps: f32,
+    momentum: f32,
+    running_mean: Arc<Tensor>,
+    running_var: Arc<Tensor>,
+    weight: Option<Tensor>,
+    bias: Option<Tensor>,
+    training: bool,
+}
+
 pub struct BatchNorm2d {
     num_features: usize,
     eps: f32,
@@ -25,6 +36,124 @@ pub struct BatchNorm2d {
     weight: Option<Tensor>,
     bias: Option<Tensor>,
     training: bool,
+}
+
+impl BatchNorm1d {
+    pub fn new(num_features: usize, eps: f32, momentum: f32, affine: bool) -> Self {
+        BatchNorm1d {
+            num_features,
+            eps,
+            momentum,
+            running_mean: Arc::new(Tensor::zeros(&[num_features])),
+            running_var: Arc::new(Tensor::ones(&[num_features])),
+            weight: if affine {
+                Some(Tensor::ones(&[num_features]))
+            } else {
+                None
+            },
+            bias: if affine {
+                Some(Tensor::zeros(&[num_features]))
+            } else {
+                None
+            },
+            training: true,
+        }
+    }
+
+    pub fn train(&mut self) {
+        self.training = true;
+    }
+
+    pub fn eval(&mut self) {
+        self.training = false;
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Result<Tensor, BellandeError> {
+        // Check for valid input shape (batch_size, num_features)
+        if input.shape.len() != 2 {
+            return Err(BellandeError::InvalidShape);
+        }
+
+        let (batch_size, features) = (input.shape[0], input.shape[1]);
+
+        if features != self.num_features {
+            return Err(BellandeError::DimensionMismatch);
+        }
+
+        let mut output = input.data.clone();
+
+        if self.training {
+            // Calculate mean and variance
+            let mut mean = vec![0.0; features];
+            let mut var = vec![0.0; features];
+
+            // Calculate mean
+            for f in 0..features {
+                let mut sum = 0.0;
+                let mut sq_sum = 0.0;
+
+                for b in 0..batch_size {
+                    let idx = b * features + f;
+                    let val = input.data[idx];
+                    sum += val;
+                    sq_sum += val * val;
+                }
+
+                mean[f] = sum / batch_size as f32;
+                var[f] = sq_sum / batch_size as f32 - mean[f] * mean[f];
+            }
+
+            // Update running statistics
+            for f in 0..features {
+                self.running_mean.data[f] =
+                    self.momentum * self.running_mean.data[f] + (1.0 - self.momentum) * mean[f];
+                self.running_var.data[f] =
+                    self.momentum * self.running_var.data[f] + (1.0 - self.momentum) * var[f];
+            }
+
+            // Normalize
+            for f in 0..features {
+                let std = (var[f] + self.eps).sqrt();
+                for b in 0..batch_size {
+                    let idx = b * features + f;
+                    output[idx] = (output[idx] - mean[f]) / std;
+
+                    // Apply affine transform if weight and bias are present
+                    if let Some(ref weight) = self.weight {
+                        output[idx] *= weight.data[f];
+                    }
+                    if let Some(ref bias) = self.bias {
+                        output[idx] += bias.data[f];
+                    }
+                }
+            }
+        } else {
+            // Use running statistics for inference
+            for f in 0..features {
+                let std = (self.running_var.data[f] + self.eps).sqrt();
+                for b in 0..batch_size {
+                    let idx = b * features + f;
+                    output[idx] = (output[idx] - self.running_mean.data[f]) / std;
+
+                    // Apply affine transform if weight and bias are present
+                    if let Some(ref weight) = self.weight {
+                        output[idx] *= weight.data[f];
+                    }
+                    if let Some(ref bias) = self.bias {
+                        output[idx] += bias.data[f];
+                    }
+                }
+            }
+        }
+
+        Ok(Tensor::new(
+            output,
+            input.shape.clone(),
+            input.requires_grad,
+            input.device.clone(),
+            input.dtype,
+        ))
+    }
 }
 
 impl BatchNorm2d {

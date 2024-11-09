@@ -14,6 +14,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::core::{error::BellandeError, tensor::Tensor};
+use crate::layer::batch_norm::BatchNorm1d;
 use crate::layer::dropout::Dropout;
 use crate::layer::{activation::ReLU, linear::Linear};
 use crate::models::sequential::Sequential;

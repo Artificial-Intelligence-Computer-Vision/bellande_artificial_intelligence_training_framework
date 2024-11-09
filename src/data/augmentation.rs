@@ -15,7 +15,6 @@
 
 use crate::core::{error::BellandeError, tensor::Tensor};
 
-use image::{DynamicImage, ImageBuffer, Rgba};
 use rand::Rng;
 
 pub trait Transform: Send + Sync {

@@ -13,6 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use crate::core::error::BellandeError;
+
 pub trait LRScheduler {
     fn step(&mut self);
     fn get_last_lr(&self) -> f32;

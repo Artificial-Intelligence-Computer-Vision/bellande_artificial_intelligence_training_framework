@@ -91,9 +91,3 @@ impl Sampler for SequentialSampler {
         self.data_len
     }
 }
-
-// Helper functions
-fn image_to_tensor(image: DynamicImage) -> Tensor {
-    // Convert image to tensor
-    unimplemented!()
-}

@@ -26,10 +26,7 @@ mod optim;
 mod training;
 mod utilities;
 
-use crate::core::device::Device;
-use crate::core::dtype::DataType;
-use crate::core::error::BellandeError;
-use crate::core::tensor::Tensor;
+use crate::core::{device::Device, error::BellandeError};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const FRAMEWORK_NAME: &str = "Bellande AI Training Framework";
@@ -114,16 +111,4 @@ impl Framework {
             Device::default(),
         )
     }
-}
-
-pub mod prelude {
-    pub use crate::{
-        core::{DataType, Device, Tensor},
-        data::{DataLoader, Dataset},
-        layer::{AvgPool2d, BatchNorm2d, Conv2d, Dropout, Linear, MaxPool2d, ReLU},
-        loss::{BCELoss, CrossEntropyLoss, Loss, MSELoss},
-        models::{Model, ResNet, Sequential, VGG},
-        optim::{Adam, Optimizer, RMSprop, SGD},
-        training::{Trainer, TrainingHistory},
-    };
 }
