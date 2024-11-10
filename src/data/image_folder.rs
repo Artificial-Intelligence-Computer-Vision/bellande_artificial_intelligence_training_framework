@@ -102,6 +102,13 @@ impl<R: Read> BitReader<R> {
 }
 
 impl ImageFolder {
+    // Define the constant within the implementation
+    const JPEG_NATURAL_ORDER: [usize; 64] = [
+        0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27,
+        20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+        58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+    ];
+
     /// Creates a new ImageFolder dataset
     pub fn new(
         root: PathBuf,
@@ -373,8 +380,12 @@ impl ImageFolder {
                                 );
 
                                 // Decode 8x8 block
-                                let block =
-                                    decode_block(&mut bit_reader, dc_table, ac_table, qtable)?;
+                                let block = Self::decode_block(
+                                    &mut bit_reader,
+                                    dc_table,
+                                    ac_table,
+                                    qtable,
+                                )?;
 
                                 // Convert YCbCr to RGB and store in pixels
                                 if component == 0 {
@@ -468,7 +479,7 @@ impl ImageFolder {
             let ac_value = Self::receive_and_extend(bit_reader, ssss).map_err(|e| {
                 BellandeError::ImageError(format!("Failed to read AC value: {}", e))
             })?;
-            zz[JPEG_NATURAL_ORDER[k]] = ac_value;
+            zz[Self::JPEG_NATURAL_ORDER[k]] = ac_value;
             k += 1;
         }
 
@@ -487,12 +498,6 @@ impl ImageFolder {
 
         Ok(block)
     }
-
-    const JPEG_NATURAL_ORDER: [usize; 64] = [
-        0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27,
-        20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
-        58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
-    ];
 
     /// Decodes a Huffman code from the bit stream
     fn decode_huffman(bit_reader: &mut BitReader<impl Read>, table: &[u8]) -> IoResult<u8> {

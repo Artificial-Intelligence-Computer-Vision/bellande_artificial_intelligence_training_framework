@@ -19,16 +19,24 @@ use std::fmt;
 #[derive(Debug)]
 pub enum BellandeError {
     NoGradients,
-    InvalidShape,
+    InvalidShape(String),
     DimensionMismatch,
     InvalidBackward,
     DeviceNotAvailable,
     InvalidDevice,
+    SerializationError,
     InvalidDataType,
     InvalidInputs,
     CUDAError(String),
     IOError(std::io::Error),
     RuntimeError(String),
+    ImageError(String),
+    InvalidOperation(String),
+    InvalidConfiguration(String),
+    NotImplemented(String),
+    EarlyStopping(String),
+    ShapeMismatch(String),
+    InvalidParameter(String),
 }
 
 impl Error for BellandeError {}
@@ -37,16 +45,24 @@ impl fmt::Display for BellandeError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             BellandeError::NoGradients => write!(f, "Gradients not enabled for this tensor"),
-            BellandeError::InvalidShape => write!(f, "Invalid tensor shape"),
+            BellandeError::InvalidShape(msg) => write!(f, "Invalid tensor shape: {}", msg),
             BellandeError::DimensionMismatch => write!(f, "Tensor dimensions do not match"),
             BellandeError::InvalidBackward => write!(f, "Invalid backward call"),
             BellandeError::DeviceNotAvailable => write!(f, "Requested device not available"),
             BellandeError::InvalidDevice => write!(f, "Invalid device specification"),
+            BellandeError::SerializationError => write!(f, "Serialization error"),
             BellandeError::InvalidDataType => write!(f, "Invalid data type"),
             BellandeError::InvalidInputs => write!(f, "Invalid number of inputs"),
             BellandeError::CUDAError(msg) => write!(f, "CUDA error: {}", msg),
             BellandeError::IOError(err) => write!(f, "IO error: {}", err),
             BellandeError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
+            BellandeError::ImageError(msg) => write!(f, "Image error: {}", msg),
+            BellandeError::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),
+            BellandeError::InvalidConfiguration(msg) => write!(f, "Invalid configuration: {}", msg),
+            BellandeError::NotImplemented(msg) => write!(f, "Not implemented: {}", msg),
+            BellandeError::EarlyStopping(msg) => write!(f, "Early stopping: {}", msg),
+            BellandeError::ShapeMismatch(msg) => write!(f, "Shape mismatch: {}", msg),
+            BellandeError::InvalidParameter(msg) => write!(f, "Invalid parameter: {}", msg),
         }
     }
 }

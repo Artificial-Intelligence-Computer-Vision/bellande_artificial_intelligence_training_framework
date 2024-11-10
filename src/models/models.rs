@@ -14,29 +14,42 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::core::{device::Device, dtype::DataType, error::BellandeError, tensor::Tensor};
-use crate::layer::Layer;
-use crate::layer::{
-    activation::ReLU, batch_norm::BatchNorm2d, conv::Conv2d, dropout::Dropout, linear::Linear,
-    pooling::MaxPool2d,
-};
+use crate::models::sequential::Sequential;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Trait defining the base functionality for all models
+/// Base model trait defining common functionality for neural networks
 pub trait Model: Send + Sync {
-    fn forward(&self, input: &Tensor) -> Result<Tensor, BellandeError>;
+    /// Forward pass through the model
+    fn forward(&mut self, input: &Tensor) -> Result<Tensor, BellandeError>;
+
+    /// Backward pass through the model
     fn backward(&mut self, grad: &Tensor) -> Result<Tensor, BellandeError>;
+
+    /// Get model parameters
     fn parameters(&self) -> Vec<Tensor>;
+
+    /// Set model to training mode
     fn train(&mut self);
+
+    /// Set model to evaluation mode
     fn eval(&mut self);
+
+    /// Save model to file
     fn save(&self, path: &str) -> Result<(), BellandeError>;
+
+    /// Load model from file
     fn load(&mut self, path: &str) -> Result<(), BellandeError>;
+
+    /// Get model state dictionary
     fn state_dict(&self) -> HashMap<String, Tensor>;
+
+    /// Load model state dictionary
     fn load_state_dict(&mut self, state_dict: HashMap<String, Tensor>)
         -> Result<(), BellandeError>;
 }
 
-/// State configuration for model serialization
+/// Model state for serialization
 #[derive(Serialize, Deserialize)]
 pub struct ModelState {
     pub model_type: String,
@@ -45,7 +58,7 @@ pub struct ModelState {
     pub config: ModelConfig,
 }
 
-/// Configuration for model architecture
+/// Model configuration
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ModelConfig {
     pub input_shape: Vec<usize>,
@@ -54,48 +67,35 @@ pub struct ModelConfig {
     pub hidden_layers: Vec<usize>,
 }
 
-/// Sequential model implementation
-#[derive(Default)]
-pub struct Sequential {
-    layers: Vec<Box<dyn Layer>>,
-    training: bool,
-}
-
-impl Sequential {
-    pub fn new() -> Self {
-        Sequential {
-            layers: Vec::new(),
-            training: true,
-        }
-    }
-
-    pub fn add(&mut self, layer: Box<dyn Layer>) -> &mut Self {
-        self.layers.push(layer);
-        self
-    }
-
-    pub fn get_layers(&self) -> &[Box<dyn Layer>] {
-        &self.layers
-    }
-
-    pub fn get_layers_mut(&mut self) -> &mut [Box<dyn Layer>] {
-        &mut self.layers
-    }
-}
-
 impl Model for Sequential {
-    fn forward(&self, input: &Tensor) -> Result<Tensor, BellandeError> {
+    fn forward(&mut self, input: &Tensor) -> Result<Tensor, BellandeError> {
+        if self.layers.is_empty() {
+            return Err(BellandeError::InvalidInputs);
+        }
+
         let mut current = input.clone();
-        for layer in &self.layers {
-            current = layer.forward(&current)?;
+        for layer in &mut self.layers {
+            current = layer
+                .forward(&current)
+                .map_err(|e| BellandeError::RuntimeError(format!("Forward pass failed: {}", e)))?;
         }
         Ok(current)
     }
 
     fn backward(&mut self, grad: &Tensor) -> Result<Tensor, BellandeError> {
+        if self.layers.is_empty() {
+            return Err(BellandeError::InvalidInputs);
+        }
+
+        if !self.training {
+            return Err(BellandeError::InvalidBackward);
+        }
+
         let mut current_grad = grad.clone();
         for layer in self.layers.iter_mut().rev() {
-            current_grad = layer.backward(&current_grad)?;
+            current_grad = layer
+                .backward(&current_grad)
+                .map_err(|e| BellandeError::RuntimeError(format!("Backward pass failed: {}", e)))?;
         }
         Ok(current_grad)
     }
@@ -142,21 +142,20 @@ impl Model for Sequential {
             },
         };
 
-        let file = std::fs::File::create(path)?;
-        serde_json::to_writer(file, &state)
-            .map_err(|e| BellandeError::SerializationError(format!("Failed to save model: {}", e)))
+        let file = std::fs::File::create(path).map_err(|e| BellandeError::IOError(e))?;
+        serde_json::to_writer(file, &state).map_err(|_| BellandeError::SerializationError)
     }
 
     fn load(&mut self, path: &str) -> Result<(), BellandeError> {
-        let file = std::fs::File::open(path)?;
-        let state: ModelState = serde_json::from_reader(file).map_err(|e| {
-            BellandeError::SerializationError(format!("Failed to load model: {}", e))
-        })?;
+        let file = std::fs::File::open(path).map_err(|e| BellandeError::IOError(e))?;
+
+        let state: ModelState =
+            serde_json::from_reader(file).map_err(|_| BellandeError::SerializationError)?;
 
         let mut state_dict = HashMap::new();
         for (key, data) in state.state_dict {
             let shape = state.shapes.get(&key).ok_or_else(|| {
-                BellandeError::SerializationError(format!("Missing shape for key: {}", key))
+                BellandeError::RuntimeError(format!("Missing shape for key: {}", key))
             })?;
 
             state_dict.insert(
@@ -186,9 +185,14 @@ impl Model for Sequential {
             for (name, _) in layer.named_parameters() {
                 let key = format!("layer_{}.{}", i, name);
                 if let Some(param) = state_dict.get(&key) {
-                    layer.set_parameter(&name, param.clone())?;
+                    layer.set_parameter(&name, param.clone()).map_err(|e| {
+                        BellandeError::RuntimeError(format!(
+                            "Failed to set parameter {}: {}",
+                            key, e
+                        ))
+                    })?;
                 } else {
-                    return Err(BellandeError::SerializationError(format!(
+                    return Err(BellandeError::RuntimeError(format!(
                         "Missing parameter: {}",
                         key
                     )));
@@ -197,68 +201,4 @@ impl Model for Sequential {
         }
         Ok(())
     }
-}
-
-/// Create a simple feed-forward neural network
-pub fn create_mlp(config: &ModelConfig) -> Result<Sequential, BellandeError> {
-    let mut model = Sequential::new();
-
-    let mut current_size = config.input_shape.iter().product();
-
-    // Input layer
-    model.add(Box::new(Linear::new(
-        current_size,
-        config.hidden_layers[0],
-        true,
-    )));
-    model.add(Box::new(ReLU::new()));
-
-    // Hidden layers
-    for i in 1..config.hidden_layers.len() {
-        if config.dropout_rate > 0.0 {
-            model.add(Box::new(Dropout::new(config.dropout_rate)));
-        }
-        model.add(Box::new(Linear::new(
-            config.hidden_layers[i - 1],
-            config.hidden_layers[i],
-            true,
-        )));
-        model.add(Box::new(ReLU::new()));
-    }
-
-    // Output layer
-    model.add(Box::new(Linear::new(
-        config.hidden_layers[config.hidden_layers.len() - 1],
-        config.num_classes,
-        true,
-    )));
-
-    Ok(model)
-}
-
-/// Create a simple CNN
-pub fn create_cnn(config: &ModelConfig) -> Result<Sequential, BellandeError> {
-    let mut model = Sequential::new();
-
-    // First conv block
-    model.add(Box::new(Conv2d::new(3, 64, 3, 1, 1, true)));
-    model.add(Box::new(BatchNorm2d::new(64, 1e-5, 0.1, true)));
-    model.add(Box::new(ReLU::new()));
-    model.add(Box::new(MaxPool2d::new(2, 2)));
-
-    // Second conv block
-    model.add(Box::new(Conv2d::new(64, 128, 3, 1, 1, true)));
-    model.add(Box::new(BatchNorm2d::new(128, 1e-5, 0.1, true)));
-    model.add(Box::new(ReLU::new()));
-    model.add(Box::new(MaxPool2d::new(2, 2)));
-
-    // Classification head
-    model.add(Box::new(Linear::new(128 * 7 * 7, 512, true)));
-    model.add(Box::new(ReLU::new()));
-    if config.dropout_rate > 0.0 {
-        model.add(Box::new(Dropout::new(config.dropout_rate)));
-    }
-    model.add(Box::new(Linear::new(512, config.num_classes, true)));
-
-    Ok(model)
 }

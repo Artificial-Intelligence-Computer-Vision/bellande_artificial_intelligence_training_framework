@@ -13,6 +13,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use crate::core::error::BellandeError;
+use std::str::FromStr;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Device {
     CPU,
@@ -41,6 +44,42 @@ impl Device {
     pub fn default() -> Self {
         Device::CPU
     }
+
+    pub fn from(device_str: &str) -> Result<Self, BellandeError> {
+        Self::from_str(device_str)
+    }
+}
+
+impl FromStr for Device {
+    type Err = BellandeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.to_lowercase();
+        if s == "cpu" {
+            Ok(Device::CPU)
+        } else if s.starts_with("cuda") {
+            if s == "cuda" {
+                Ok(Device::CUDA(0))
+            } else {
+                let parts: Vec<&str> = s.split(':').collect();
+                if parts.len() != 2 {
+                    return Err(BellandeError::InvalidDevice);
+                }
+                match parts[1].parse::<usize>() {
+                    Ok(device_id) => {
+                        if device_id < Self::cuda_device_count() {
+                            Ok(Device::CUDA(device_id))
+                        } else {
+                            Err(BellandeError::DeviceNotAvailable)
+                        }
+                    }
+                    Err(_) => Err(BellandeError::InvalidDevice),
+                }
+            }
+        } else {
+            Err(BellandeError::InvalidDevice)
+        }
+    }
 }
 
 impl std::fmt::Display for Device {
@@ -49,5 +88,11 @@ impl std::fmt::Display for Device {
             Device::CPU => write!(f, "cpu"),
             Device::CUDA(device_id) => write!(f, "cuda:{}", device_id),
         }
+    }
+}
+
+impl Default for Device {
+    fn default() -> Self {
+        Self::CPU
     }
 }
